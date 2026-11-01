@@ -27,7 +27,7 @@ PRODUCTIONS={
  'Don Giovanni':'don-giovanni',
  'La bohème':'la-boheme',
  'Anna Bolena':'anna-bolena',
- "The Rake's Progress":'the-rakes-progress',
+ "The Rake's Progress":'the-rake-s-progress',
  'Macbeth':'macbeth',
  'Don Quichotte':'don-quichotte',
  'I puritani':'i-puritani',

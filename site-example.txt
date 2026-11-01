@@ -1,0 +1,5 @@
+After GitHub Pages is deployed, your subscription URLs will look like:
+https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPOSITORY/performances.ics
+https://YOUR-GITHUB-USERNAME.github.io/YOUR-REPOSITORY/ticket-sales.ics
+
+Do not subscribe to those examples literally. Replace username and repository name.

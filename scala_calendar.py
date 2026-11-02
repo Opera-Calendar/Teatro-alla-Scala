@@ -155,7 +155,7 @@ def fold(s):
 
 def vevent(uid,start,summary,description,url,alarms=()):
  # Approximate 3-hour duration: explicitly mark as placeholder; user should check official duration.
- end=start+timedelta(minutes=5 if alarms else 180)
+ end=start+timedelta(minutes=30 if alarms else 180)
  rows=['BEGIN:VEVENT',f'UID:{uid}@opera-schedules',f'DTSTAMP:{datetime.now(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',
        f'DTSTART:{start.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',f'DTEND:{end.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',
        'SUMMARY:'+escaped(summary),'LOCATION:'+escaped(LOCATION if not alarms else 'Online: Teatro alla Scala ticketing'),

@@ -1,205 +1,231 @@
 #!/usr/bin/env python3
-"""Unofficial La Scala calendar generator from official public pages.
-Fail closed when essential information is missing; no fabricated performances.
+"""Unofficial La Scala opera calendars. Official pages only; fail closed.
+
+Automatic season discovery does not imply guaranteed future compatibility: if the
+website layout changes, this tool refuses to replace the published calendars.
 """
 from __future__ import annotations
 import argparse
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 import hashlib
 import json
-import re
 from pathlib import Path
-from urllib.parse import urljoin
+import re
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
+
 import requests
 from bs4 import BeautifulSoup
 
-BASE='https://www.teatroallascala.org'
-SEASON='https://www.teatroallascala.org/en/season/2026-2027/index.html'
-SALES='https://www.teatroallascala.org/it/stagione/biglietteria/biglietti/calendario-apertura-vendite.html'
-ROME=ZoneInfo('Europe/Rome')
-LOCATION='Teatro alla Scala, Via Filodrammatici 2, 20121 Milano, Italy'
-# Explicit official page paths serve as a fallback if the season-page navigation changes.
-PRODUCTIONS={
- 'Otello - UNDER30 Preview':'otello-under30-preview',
- 'Otello':'otello',
- 'Les Pêcheurs de perles':'les-pecheurs-de-perles',
- 'Don Giovanni':'don-giovanni',
- 'La bohème':'la-boheme',
- 'Anna Bolena':'anna-bolena',
- "The Rake's Progress":'the-rake-s-progress',
- 'Macbeth':'macbeth',
- 'Don Quichotte':'don-quichotte',
- 'I puritani':'i-puritani',
- 'Nixon in China':'nixon-in-china',
- 'Leonora':'leonora',
+BASE = 'https://www.teatroallascala.org'
+SALES = BASE + '/it/stagione/biglietteria/biglietti/calendario-apertura-vendite.html'
+ROME = ZoneInfo('Europe/Rome')
+UTC = ZoneInfo('UTC')
+LOCATION = 'Teatro alla Scala, Via Filodrammatici 2, 20121 Milano, Italy'
+# The verified 26/27 titles are retained as a safe fallback only for that season.
+KNOWN_2627 = {
+ 'Otello - UNDER30 Preview':'otello-under30-preview', 'Otello':'otello',
+ 'Les Pêcheurs de perles':'les-pecheurs-de-perles', 'Don Giovanni':'don-giovanni',
+ 'La bohème':'la-boheme', 'Anna Bolena':'anna-bolena',
+ "The Rake's Progress":'the-rake-s-progress', 'Macbeth':'macbeth',
+ 'Don Quichotte':'don-quichotte', 'I puritani':'i-puritani',
+ 'Nixon in China':'nixon-in-china', 'Leonora':'leonora',
  'Il barbiere di Siviglia':'il-barbiere-di-siviglia',
  'Dido and Æneas':'dido-and-aeneas',
 }
-MONTHS={'gennaio':1,'febbraio':2,'marzo':3,'aprile':4,'maggio':5,'giugno':6,'luglio':7,'agosto':8,'settembre':9,'ottobre':10,'novembre':11,'dicembre':12}
+MONTHS = {m: n for n, m in enumerate(('january','february','march','april','may','june','july','august','september','october','november','december'), 1)}
 
-def fetch(url,session=requests):
- r=session.get(url,timeout=35,headers={'User-Agent':'OperaSchedulesCalendar/1.0 (personal calendar; contact via GitHub repository)'})
- r.raise_for_status()
- return r.text
+def fetch(url, session=requests):
+    r = session.get(url, timeout=35, headers={'User-Agent':'OperaSchedulesCalendar/2.0 (public calendar, GitHub)'})
+    r.raise_for_status()
+    return r.text
 
-def lines(soup):
- for tag in soup(['script','style','nav','footer']):tag.decompose()
- return [re.sub(r'\s+',' ',x).strip() for x in soup.stripped_strings if x.strip()]
+def text_lines(markup):
+    soup = BeautifulSoup(markup, 'html.parser')
+    for t in soup(['script','style','nav','footer']): t.decompose()
+    return [re.sub(r'\s+', ' ',s).strip() for s in soup.stripped_strings if s.strip()]
 
-def slug_url(key):
- return BASE+'/en/season/2026-2027/opera/'+PRODUCTIONS[key]+'.html'
+def season_url(start):
+    return f'{BASE}/en/season/{start}-{start+1}/index.html'
 
-def season_urls(markup):
- soup=BeautifulSoup(markup,'html.parser')
- out={}
- for a in soup.find_all('a',href=True):
-  href=urljoin(BASE,a['href'])
-  if '/2026-2027/opera/' in href and href.endswith('.html'):
-   for k in PRODUCTIONS:
-    if PRODUCTIONS[k]+'.html' in href:
-     out[k]=href
- return {k:out.get(k,slug_url(k)) for k in PRODUCTIONS}
+def season_links(markup, start):
+    """Discover production hrefs from official Opera section, never guessing slugs."""
+    soup = BeautifulSoup(markup, 'html.parser')
+    season = f'/{start}-{start+1}/opera/'
+    found = {}
+    # Prefer links in the explicitly labelled Opera section. This avoids ballets.
+    h = next((h for h in soup.find_all(re.compile('^h[1-6]$')) if h.get_text(' ',strip=True).casefold() == 'opera'), None)
+    if h:
+        for node in h.next_elements:
+            if getattr(node, 'name', None) in ('h1','h2') and node is not h:
+                break
+            if getattr(node,'name', None) == 'a' and node.get('href'):
+                u = urljoin(BASE,node['href'])
+                if season in urlparse(u).path and u.endswith('.html'):
+                    heading = node.find(re.compile('^h[1-6]$'))
+                    title = (heading or node).get_text(' ',strip=True)
+                    if title: found[title] = u
+    # Fallback: all links explicitly in /opera/ (only from the season index).
+    if not found:
+        for a in soup.find_all('a',href=True):
+            u=urljoin(BASE,a['href'])
+            if season in urlparse(u).path and u.endswith('.html'):
+                title=a.get_text(' ',strip=True)
+                if title and len(title)<120: found[title]=u
+    if start == 2026:
+        for title,slug in KNOWN_2627.items():
+            found.setdefault(title, f'{BASE}/en/season/2026-2027/opera/{slug}.html')
+    # Avoid duplicate links to same production; keep meaningful titles.
+    return {(title, url) for title,url in found.items()}
 
-def dt_from_parts(day,month,year,time):
- return datetime(int(year),int(month),int(day),int(time[:2]),int(time[3:5]),tzinfo=ROME)
+def find_seasons(session=requests, now=None):
+    now = now or datetime.now(ROME)
+    # Cover current and upcoming season, keep the known 2026/27 season as anchor.
+    starts = list(range(2026, max(2027, now.year+2)))
+    result=[]
+    for year in starts:
+        try: markup = fetch(season_url(year),session)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (404,410) and year>2026:
+                continue  # A future season has simply not been announced yet.
+            raise
+        result.append((year,markup))
+    return result
 
-def parse_performances(txt):
- """Extract official weekday/date plus following 12h clock time from page text."""
- result=[]
- pattern=re.compile(r'(?i)^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?\s+(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})$')
- for i,t in enumerate(txt):
-  m=pattern.match(t)
-  if not m:continue
-  for nextline in txt[i+1:i+5]:
-   v=re.fullmatch(r'(\d{1,2}):(\d\d)\s*([AP]M)',nextline,re.I)
-   if v:
-    hour=int(v[1])%12+(12 if v[3].upper()=='PM' else 0)
+def parse_dates(lines):
+    out=[]
+    pat=re.compile(r'(?i)^(?:Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)\s+(\d{1,2})\s+([A-Za-z]+)\s+(20\d{2})$')
+    for i,t in enumerate(lines):
+        m=pat.match(t)
+        if not m: continue
+        for s in lines[i+1:i+5]:
+            v=re.fullmatch(r'(\d{1,2}):(\d\d)\s*([AP]M)',s,re.I)
+            if v:
+                mo=MONTHS.get(m[2].lower())
+                if mo:
+                    hour=int(v[1])%12+(12 if v[3].upper()=='PM' else 0)
+                    try:out.append(datetime(int(m[3]),mo,int(m[1]),hour,int(v[2]),tzinfo=ROME))
+                    except ValueError: pass
+                break
+    return sorted(set(out))
+
+def parse_production(markup,title,url):
+    lines=text_lines(markup)
+    dates=parse_dates(lines)
+    if not dates: raise ValueError(f'{title}: performance dates not found ({url})')
+    flat='\n'.join(lines)
+    m=re.search(r'(?im)^Conductor\s*(?:\||:)?\s*(.+)$',flat)
+    conductor=m.group(1).strip() if m else 'Not published'
+    if conductor in ('Staging','Cast') or len(conductor)>100: conductor='Not published'
+    cast=[]
     try:
-     day=datetime.strptime(f'{m[1]} {m[2]} {m[3]}','%d %B %Y').date()
-     result.append(datetime(day.year,day.month,day.day,hour,int(v[2]),tzinfo=ROME))
-    except ValueError:pass
-    break
- return sorted(set(result))
+        first=next(i for i,x in enumerate(lines) if x.casefold()=='cast')
+        last=next((i for i in range(first+1,len(lines)) if lines[i].casefold() in ('in brief','synopsis','the story','the plot')),len(lines))
+        for item in lines[first+1:last]:
+            if ' | ' in item:
+                role,artists=item.split(' | ',1)
+                if role and artists: cast.append((role.strip(),artists.strip()))
+    except StopIteration:pass
+    composer='Not published'
+    for i,line in enumerate(lines):
+        if line.casefold()==title.replace(' - UNDER30 Preview','').casefold() and i+1<len(lines):
+            candidate=lines[i+1]
+            if 2<=len(candidate)<=75 and not candidate.startswith('From '):
+                composer=candidate
+                break
+    return dict(title=title,composer=composer,url=url,conductor=conductor,cast=cast,dates=dates)
 
-def parse_production(markup,key,url):
- soup=BeautifulSoup(markup,'html.parser')
- txt=lines(soup)
- perf=parse_performances(txt)
- if not perf:raise ValueError(f'{key}: no performance dates/times found; layout may have changed')
- # Conductor and cast are located between visible headings and synopsis.
- flat='\n'.join(txt)
- cm=re.search(r'(?im)^Conductor\s*(?:\||:)?\s*(.+)$',flat)
- conductor=cm.group(1).strip() if cm else 'Not published'
- if conductor in ('Staging','Cast') or len(conductor)>100:conductor='Not published'
- cast=[]
- try:
-  start=next(i for i,v in enumerate(txt) if v.lower()=='cast')
-  end=next((i for i in range(start+1,len(txt)) if txt[i].lower() in ('in brief','synopsis','the story','the plot')),len(txt))
-  for item in txt[start+1:end]:
-   if ' | ' in item:
-    role,performers=item.split(' | ',1)
-    if role and performers:cast.append((role.strip(),performers.strip()))
- except StopIteration:pass
- # Composer follows production title on official page, if discoverable.
- composer='Not published'
- for i,t in enumerate(txt):
-  if t.casefold()==key.replace(' - UNDER30 Preview','').casefold() and i+1<len(txt):
-   c=txt[i+1]
-   if 2<=len(c)<=75 and not c.startswith('From '):composer=c;break
- return {'title':key,'composer':composer,'url':url,'conductor':conductor,'cast':cast,'dates':perf}
+def parse_sales(markup, production_titles=None):
+    soup=BeautifulSoup(markup,'html.parser'); rows=[]
+    for tr in soup.find_all('tr'):
+        cells=[x.get_text(' ',strip=True) for x in tr.find_all(['td','th'],recursive=False)]
+        if len(cells)>=2:rows.append(cells)
+    if not rows:
+        ls=text_lines(markup)
+        rows=[ls[i:i+2] for i in range(len(ls)-1) if re.search(r'\b\d{2}/\d{2}/20\d{2}\s+ore\s+\d{1,2}[.:]\d{2}',ls[i+1],re.I)]
+    entries=[]
+    titles=sorted(production_titles if production_titles is not None else KNOWN_2627,key=len,reverse=True)
+    for r in rows:
+        label=' '.join(r[:-1]); raw=r[-1]
+        m=re.search(r'(\d{2})/(\d{2})/(20\d{2})\s+ore\s+(\d{1,2})[.:](\d{2})',raw,re.I)
+        if not m:continue
+        lower=label.casefold()
+        key=next((t for t in titles if t.casefold() in lower),None)
+        if key=='Otello' and ('inaugurale' in lower or '7 dicembre' in lower):key='Otello - Opening Night'
+        if key=='Otello' and 'under30' in lower:key='Otello - UNDER30 Preview'
+        if not key:continue
+        dd,mm,yy,hh,minute=map(int,m.groups())
+        entries.append(dict(title=key,when=datetime(yy,mm,dd,hh,minute,tzinfo=ROME),label=label))
+    return sorted({(x['title'],x['when']):x for x in entries}.values(),key=lambda x:x['when'])
 
-def sale_key(label):
- s=re.sub(r'\s+',' ',label).strip().casefold()
- for k in sorted(PRODUCTIONS,key=len,reverse=True):
-  if k.casefold() in s:return k
- if 'otello' in s and 'under30' in s:return 'Otello - UNDER30 Preview'
- return None
-
-def parse_sales(markup):
- soup=BeautifulSoup(markup,'html.parser')
- rows=[]
- for tr in soup.find_all('tr'):
-  cells=[x.get_text(' ',strip=True) for x in tr.find_all(['td','th'],recursive=False)]
-  if len(cells)>=2:rows.append(cells)
- # Also handle text extract if table is presented in a different semantic format.
- if not rows:
-  t=lines(soup)
-  rows=[t[i:i+2] for i in range(len(t)-1) if re.search(r'\b\d{2}/\d{2}/20\d{2}\s+ore\s+\d{1,2}[.:]\d{2}',t[i+1],re.I)]
- entries=[]
- for r in rows:
-  label=' '.join(r[:-1]);when=r[-1]
-  match=re.search(r'(\d{2})/(\d{2})/(20\d{2})\s+ore\s+(\d{1,2})[.:](\d{2})',when,re.I)
-  if not match:continue
-  if not ('opera' in label.lower() or any(k.lower() in label.lower() for k in PRODUCTIONS)):continue
-  key=sale_key(label)
-  if key=='Otello' and ('inaugurale' in label.lower() or '7 dicembre' in label.lower()):key='Otello - Opening Night'
-  if key=='Otello' and 'under30' in label.lower():key='Otello - UNDER30 Preview'
-  if not key:continue
-  dd,mm,yy,hh,mi=map(int,match.groups())
-  entries.append({'title':key,'when':datetime(yy,mm,dd,hh,mi,tzinfo=ROME),'label':label})
- return sorted({(x['title'],x['when']):x for x in entries}.values(),key=lambda x:x['when'])
-
-def escaped(value):
- return str(value).replace('\\','\\\\').replace(';','\\;').replace(',','\\,').replace('\n','\\n')
+def escape(s):
+    return str(s).replace('\\','\\\\').replace(';','\\;').replace(',','\\,').replace('\n','\\n')
 
 def fold(s):
- # RFC5545 75-octet physical lines; don't split unicode code points
- parts=[];part=''
- for ch in s:
-  if len((part+ch).encode('utf8'))>75:
-   parts.append(part);part=' '+ch
-  else:part+=ch
- if part:parts.append(part)
- return '\r\n'.join(parts)
+    parts=[];part=''
+    for c in s:
+        if len((part+c).encode())>75:
+            parts.append(part);part=' '+c
+        else:part+=c
+    if part:parts.append(part)
+    return '\r\n'.join(parts)
 
-def vevent(uid,start,summary,description,url,alarms=()):
- # Approximate 3-hour duration: explicitly mark as placeholder; user should check official duration.
- end=start+timedelta(minutes=30 if alarms else 180)
- rows=['BEGIN:VEVENT',f'UID:{uid}@opera-schedules',f'DTSTAMP:{datetime.now(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',
-       f'DTSTART:{start.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',f'DTEND:{end.astimezone(ZoneInfo("UTC")).strftime("%Y%m%dT%H%M%SZ")}',
-       'SUMMARY:'+escaped(summary),'LOCATION:'+escaped(LOCATION if not alarms else 'Online: Teatro alla Scala ticketing'),
-       'DESCRIPTION:'+escaped(description),'URL:'+url]
- for days in alarms:rows+=['BEGIN:VALARM','ACTION:DISPLAY',f'TRIGGER:-P{days}D','DESCRIPTION:'+escaped(summary),'END:VALARM']
- return '\r\n'.join(fold(r) for r in rows)+'\r\nEND:VEVENT\r\n'
+def event(uid,when,summary,description,url,alarms=()):
+    end=when+timedelta(minutes=30 if alarms else 180)
+    lines=['BEGIN:VEVENT',f'UID:{uid}@opera-schedules',f'DTSTAMP:{datetime.now(UTC):%Y%m%dT%H%M%SZ}',
+        f'DTSTART:{when.astimezone(UTC):%Y%m%dT%H%M%SZ}',f'DTEND:{end.astimezone(UTC):%Y%m%dT%H%M%SZ}',
+        'SUMMARY:'+escape(summary),'LOCATION:'+escape('Online: Teatro alla Scala ticketing' if alarms else LOCATION),
+        'DESCRIPTION:'+escape(description),'URL:'+url]
+    for days in alarms:
+        lines += ['BEGIN:VALARM','ACTION:DISPLAY',f'TRIGGER:-P{days}D','DESCRIPTION:'+escape(summary),'END:VALARM']
+    return '\r\n'.join(fold(x) for x in lines)+'\r\nEND:VEVENT\r\n'
 
-def ics(events, name):
- return 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Opera Schedules//La Scala Official Source//EN\r\nCALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\nX-WR-CALNAME:'+escaped(name)+'\r\n'+''.join(events)+'END:VCALENDAR\r\n'
+vevent = event  # Backward-compatible interface for the existing test suite.
 
-def generate(session=requests):
- index=fetch(SEASON,session)
- urls=season_urls(index)
- prods=[];fail=[]
- for k,url in urls.items():
-  try:prods.append(parse_production(fetch(url,session),k,url))
-  except Exception as exc:fail.append(str(exc))
- if fail:raise RuntimeError('Production pages not verified; refusing incomplete publication:\n'+'\n'.join(fail))
- sales=parse_sales(fetch(SALES,session))
- if len(sales)<10:raise RuntimeError(f'Only {len(sales)} opera ticket-sales entries parsed. Refusing publication.')
- perf=[]
- for p in prods:
-  for d in p['dates']:
-   desc=f"Composer: {p['composer']}\nConductor: {p['conductor']}\n"
-   desc+='Cast (as published for production; date-specific casting must be checked):\n'
-   desc+='\n'.join(f'{role}: {names}' for role,names in p['cast']) if p['cast'] else 'Cast not published'
-   desc+='\nEstimated calendar end time: 3 hours after start, NOT an official duration.\nOfficial: '+p['url']
-   ident=hashlib.sha256((p['url']+'|'+d.isoformat()).encode()).hexdigest()[:24]
-   perf.append(vevent('performance-'+ident,d,p['title']+' — Teatro alla Scala',desc,p['url']))
- ticket=[]
- for s in sales:
-  label=s['title'];uid=hashlib.sha256(('sale-'+label).encode()).hexdigest()[:24]
-  desc='Official PUBLIC ticket sale opening (not subscriptions).\n'+s['label']+'\nOfficial reference: '+SALES
-  ticket.append(vevent('sale-'+uid,s['when'],'TICKET SALES: '+label,desc,SALES,(7,1)))
- if len(perf)<40:raise RuntimeError(f'Only {len(perf)} performances found; refusing publication')
- return ics(perf,'La Scala — Opera performances'),ics(ticket,'La Scala — Ticket sales'),{'performances':len(perf),'ticket_sales':len(sales),'productions':len(prods)}
+def ics(events,name):
+    return ('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Opera Schedules//La Scala//EN\r\n'
+            'CALSCALE:GREGORIAN\r\nMETHOD:PUBLISH\r\nX-WR-CALNAME:'+escape(name)+'\r\n'+''.join(events)+'END:VCALENDAR\r\n')
+
+def generate(session=requests,now=None):
+    now=now or datetime.now(ROME)
+    discovered={}; seasons=[]
+    for year,markup in find_seasons(session,now):
+        links=season_links(markup,year)
+        if not links: raise RuntimeError(f'Season {year}/{year+1} exists but no opera links found; refusing incomplete publication')
+        seasons.append(year)
+        for title,url in links: discovered[url]=title
+    if not discovered: raise RuntimeError('No productions found; refusing publication')
+    productions=[];failed=[]
+    for url,title in sorted(discovered.items()):
+        try: productions.append(parse_production(fetch(url,session),title,url))
+        except Exception as e: failed.append(f'{title}: {e}')
+    if failed: raise RuntimeError('Some official production pages failed; refusing incomplete publication:\n'+'\n'.join(failed))
+    sales=parse_sales(fetch(SALES,session),{p['title'] for p in productions})
+    if not sales:raise RuntimeError('No matching official ticket sale events found; refusing publication')
+    perfs=[]
+    for p in productions:
+        for d in p['dates']:
+            if d.date()<now.date()-timedelta(days=2):continue
+            desc=f"Composer: {p['composer']}\nConductor: {p['conductor']}\nCast (production-level; check date-specific casting):\n"
+            desc+='\n'.join(f'{role}: {artists}' for role,artists in p['cast']) if p['cast'] else 'Not published'
+            desc+='\nEstimated end time (3h, not official).\nOfficial: '+p['url']
+            uid=hashlib.sha256((p['url']+'|'+d.isoformat()).encode()).hexdigest()[:24]
+            perfs.append(event('performance-'+uid,d,p['title']+' — Teatro alla Scala',desc,p['url']))
+    if len(perfs)<10:raise RuntimeError(f'Only {len(perfs)} upcoming performances found; refusing publication')
+    tickets=[]
+    for s in sales:
+        uid=hashlib.sha256(('sale-'+s['title']).encode()).hexdigest()[:24]
+        desc='Public individual-ticket sales (not subscriptions).\n'+s['label']+'\nOfficial: '+SALES
+        tickets.append(event('sale-'+uid,s['when'],'TICKET SALES: '+s['title'],desc,SALES,(7,1)))
+    return ics(perfs,'La Scala — Opera performances'),ics(tickets,'La Scala — Ticket sales'),dict(seasons=seasons,productions=len(productions),performances=len(perfs),ticket_sales=len(sales))
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--output',default='site');args=p.parse_args()
- performances,sales,stats=generate()
- dest=Path(args.output);dest.mkdir(exist_ok=True,parents=True)
- (dest/'performances.ics').write_bytes(performances.encode('utf8'))
- (dest/'ticket-sales.ics').write_bytes(sales.encode('utf8'))
- (dest/'status.json').write_text(json.dumps({'updated_at':datetime.now(ZoneInfo('UTC')).isoformat(),**stats},indent=2))
- (dest/'.nojekyll').touch()
- print('Generated:',stats)
+    p=argparse.ArgumentParser();p.add_argument('--output',default='site');a=p.parse_args()
+    performances,sales,stats=generate()
+    dest=Path(a.output);dest.mkdir(parents=True,exist_ok=True)
+    (dest/'performances.ics').write_bytes(performances.encode())
+    (dest/'ticket-sales.ics').write_bytes(sales.encode())
+    (dest/'status.json').write_text(json.dumps({'updated_at':datetime.now(UTC).isoformat(),**stats},indent=2))
+    (dest/'.nojekyll').touch()
+    print('Generated',stats)
 if __name__=='__main__':main()

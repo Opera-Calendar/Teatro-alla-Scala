@@ -171,7 +171,7 @@ def fold(s):
     return '\r\n'.join(parts)
 
 def event(uid,when,summary,description,url,alarms=()):
-    end=when+timedelta(minutes=30 if alarms else 180)
+    end=when+timedelta(minutes=60 if alarms else 180)
     lines=['BEGIN:VEVENT',f'UID:{uid}@opera-schedules',f'DTSTAMP:{datetime.now(UTC):%Y%m%dT%H%M%SZ}',
         f'DTSTART:{when.astimezone(UTC):%Y%m%dT%H%M%SZ}',f'DTEND:{end.astimezone(UTC):%Y%m%dT%H%M%SZ}',
         'SUMMARY:'+escape(summary),'LOCATION:'+escape('Online: Teatro alla Scala ticketing' if alarms else LOCATION),
